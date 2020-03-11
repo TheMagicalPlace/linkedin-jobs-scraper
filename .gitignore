@@ -3,3 +3,4 @@
 *.pyc
 *.sh
 *.log
+/nb_scraper.py

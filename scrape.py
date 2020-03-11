@@ -7,268 +7,99 @@ from selenium.webdriver.support import expected_conditions as EC
 import datetime
 import json
 import time
+import re
+import os
 
+class LinkdenScraper:
 
-def job_id(driver):
-    """
-    grabs the meta linkedin unique job id from the url
-    e.g. url = https://www.linkedin.com/jobs/view/161251904
-    returns 161251904
-    """
-    elem = driver.find_element_by_xpath("//meta[@property='og:url']")
-    url  = elem.get_attribute("content")
-    return url[url.find('/', 34) + 1:]
-
-def parse_post_age(text):
-        """ map 'posted 10 days ago' => '10' """
-        if 'hours' in text:
-            return '1'
-        return ''.join(list(filter(lambda c: c.isdigit(), text)))
-
-def post_data(driver):
-    """
-    get post age and page views and trim excess words
-    so that 'posted 10 days ago' becomes '10'
-    and '63 views' becomes '63' 
-    """
-    post_info = {
-        "post_age"   : "li.posted", 
-        "page_views" : "ul.posting-info li.views"
-    }
-    for key, selector in post_info.items():
+    def __init__(self,driver,path_args = ()):
+        self.driver =driver
+        self.path_args = path_args
         try:
-            text = driver.find_element_by_css_selector(selector).text
-            if key == "post_age":
-                post_info[key] = parse_post_age(text)
+            with open(os.path.join(os.getcwd(),*path_args,'lk_jobs_data.json'),'r') as data:
+                self.data = json.loads(data.read())
+        except FileNotFoundError:
+            with open(os.path.join(os.getcwd(),*path_args,'lk_jobs_data.json'),'w') as data:
+                self.data = {}
+                data.write(json.dumps(self.data))
+
+    def num_applicants(self):
+        """
+        Grabs number of applicants from either the header of the
+        applicants-insights div, or within the applicants-table in the same
+        div element. Returns empty string if data is not available.
+        """
+        # use two selectors since LI has two methods of showing number
+        # of applicants in the applicants-insights driver
+        num_applicant_selectors = [
+            "span.jobs-details-job-summary__text-ellipsis",
+            "table.other-applicants-table.comparison-table tr td",
+            "p.number-of-applicants"
+        ]
+        for selector in num_applicant_selectors:
+            try:
+                num_applicants = self.driver.find_element_by_css_selector(selector).text
+            except Exception as e:
+                pass
             else:
-                post_info[key] = ''.join(list(filter(lambda c: c.isdigit(), text)))
-        except Exception as e:
-            post_info[key] = ""
-            pass
-    return post_info
+                return ''.join(list(filter(lambda c: c.isdigit(), num_applicants)))
+        return ''
 
-def job_data(driver):
-    """
-    scrapes the posting info for title, company, post age, location,
-    and page views. Have seen many strange errors surrounding the
-    job tite, company, location data, so have used many try-except
-    statements to avoid potential errors with unicode, etc.
-    """
-    job_info = {
-        "job_title"        :  "h1.title",
-        "company"          :  "span.company",
-        "location"         :  "h3.location",
-        "employment_type"  :  "div.employment div.content div.rich-text",
-        "industry"         :  "div.industry div.content div.rich-text",
-        "experience"       :  "div.experience div.content div.rich-text",
-        "job_function"     :  "div.function div.content div.rich-text",
-        "description"      :  "div.summary div.content div.description-section div.rich-text"
-    }
-    # click the 'read more' button to reveal more about the job posting
-    try:
-        driver.find_element_by_css_selector("button#job-details-reveal").click()
-    except Exception as e:
-        print("error in attempting to click 'reveal details' button")
-        print(e)
-    for key, selector in job_info.items():
-        try:
-            job_info[key] = driver.find_element_by_css_selector(selector).text
-        except Exception as e:
-            job_info[key] = ""
-            pass
-    return job_info
-
-def company_data(driver):
-    """return company insights, number of employees and average tenure"""
-    try:
-        stats_selector = "ul.company-growth-stats.stats-list li"
-        company_stats  = driver.find_elements_by_css_selector(stats_selector)
-        company_info   = [stat.text for stat in company_stats]
-    except Exception as e:
-        print("error acquiring company info")
-        print(e)
-    else:
-        try:
-            employees     = list(filter(lambda text: 'employees' in text, company_info))
-            num_employees = ''.join(list(filter(lambda c: c.isdigit(), employees[0])))
-        except Exception as e:
-            num_employees = ""
-            pass
-        try:
-            tenure        = list(filter(lambda text: 'tenure' in text, company_info))
-            avg_tenure    = ''.join(list(filter(lambda c: c in '0123456789.', tenure[0])))
-        except Exception as e:
-            avg_tenure    = ""
-            pass
-        company_info  = {
-            "avg_tenure"    : avg_tenure, 
-            "num_employees" : num_employees
+    def job_data(self, elem_link):
+        """
+        scrapes the posting info for title, company, post age, location,
+        and page views. Have seen many strange errors surrounding the
+        job title, company, location data, so have used many try-except
+        statements to avoid potential errors with unicode, etc.
+        """
+        link = elem_link.get_attribute('href')
+        job_name = elem_link.text
+        elem_link.click()
+        job_info = {
+            "link": link,
+            "job name": job_name,
+            "company": self.driver.find_element_by_css_selector("a.jobs-details-top-card__company-url").text,
+            "location": self.driver.find_element_by_class_name("jobs-details-top-card__bullet").text,
+            "description": self.driver.find_element_by_id("job-details").text,
+            'date_posted': 'n/a'
         }
-    return {"avg_tenure" : avg_tenure, "num_employees" : num_employees}
+        # click the 'read more' button to reveal more about the job posting
+        return job_info
 
-def salary_data(driver):
-    """
-    scrapes the salary info chart on the right panel returns lower, 
-    upper bounds on salary estimate as well as average salary
-    """
-    try:
-        _base = driver.find_element_by_xpath('/descendant::p[@class="salary-data-amount"][1]').text
-        _total = driver.find_element_by_xpath('/descendant::p[@class="salary-data-amount"][2]').text
-        _base_range = driver.find_element_by_xpath('/descendant::p[@class="salary-data-range"][1]').text
-        _total_range = driver.find_element_by_xpath('/descendant::p[@class="salary-data-range"][2]').text
-        return {
-            "base" : ''.join(list(filter(lambda c: c.isdigit(), _base))),
-            "total" : ''.join(list(filter(lambda c: c.isdigit(), _total))),
-            "base_range": _base_range,
-            "total_range": _total_range
+    def parse_post_age(self):
+        age = self.driver.find_elements_by_css_selector("p.jobs-details-top-card__job-info")
+        for a in age:
+            ag = self.driver.find_elements_by_xpath("//p[@class='jobs-details-top-card__job-info']/child::*")
+            aget = a.text
+            post_age = re.findall(r'(?:\nPosted)\s([0-9]+ (hours?|days?|weeks?|months?))', aget)
+        return post_age[0]
+
+    def scrape_page(self, element):
+        """
+        scrapes single job page after the driver loads a new job posting.
+        Returns data as a dictionary
+        """
+        # wait ~1 second for elements to be dynamically rendered
+        time.sleep(1.2)
+        start = time.time()
+
+        applicant_info = {
+            "num_applicants"    :  self.num_applicants(),
+        #    "skills"            :  applicants_skills(driver),
+        #    "education"         :  applicants_education(driver),
+        #    "locations"         :  applicants_locations(driver)
         }
-    except Exception as e:
-        print("error acquiring salary info")
-        print(e)
-        pass
-    return {"base": "", "total": "", "base_range": "", "total_range": ""}
 
+        data = {
+        #    "applicant_info"    :  applicant_info,
+            "job_info"          :  self.job_data(element),
+            "job_age"         :  self.parse_post_age(),
+        }
+        print("scraped page in  {}  seconds\n".format(time.time()-start))
 
-def num_applicants(driver):
-    """
-    Grabs number of applicants from either the header of the 
-    applicants-insights div, or within the applicants-table in the same 
-    div element. Returns empty string if data is not available.
-    """
-    # use two selectors since LI has two methods of showing number
-    # of applicants in the applicants-insights driver
-    num_applicant_selectors = [
-        "span.applicant-rank-header-text",
-        "table.other-applicants-table.comparison-table tr td",
-        "p.number-of-applicants"
-    ]
-    for selector in num_applicant_selectors:
-        try:
-            num_applicants = driver.find_element_by_css_selector(selector).text
-        except Exception as e:
-            pass
-        else:
-            return ''.join(list(filter(lambda c: c.isdigit(), num_applicants)))
-    return ''
+        post_title = data["job_info"]["job name"]+"_"+data["job_info"]["company"]
+        self.data[post_title] = data
 
-def applicants_education(driver):
-    """return dictionary of applicant education levels"""
-    education_selector = "table.applicants-education-table.comparison-table tbody tr"
-    try:
-        education = driver.find_elements_by_css_selector(education_selector)
-        if education:
-            # grab the degree type and proportion of applicants with that
-            # degree.
-            remove = ["have", "a", "Degree", "degrees", "(Similar", "to", "you)"]
-            edu_map = list(map(
-                    lambda edu: list(filter(
-                            lambda word: word not in remove, 
-                            edu
-                        )), 
-                    [item.text.split() for item in education]
-                ))
-            # store the education levels in a dictionary and prepare to 
-            # write it to file
-            edu_dict = {
-                "education" + str(i + 1) : { 
-                                    "degree" : ' '.join(edu_map[i][1:]), 
-                                    "proportion": edu_map[i][0]
-                                } 
-                for i in range(len(edu_map))
-            }
-            return edu_dict
-    except Exception as e:
-        print("error acquiring applicants education")
-        print(e)
-    return {}
-
-def applicants_locations(driver):
-    """
-    scrapes the applicants-insights-hover-content div on a 
-    given job page. Grabs the location and number of applicants 
-    from each location.
-    """
-    applicants_info = {}
-    try:
-        elem = driver.find_elements_by_css_selector("a.location-title")
-        for i in range(len(elem)):
-            # city and applicants are separated by a new line
-            city, applicants = elem[i].text.split('\n')
-            # get number of applicants by removing the word 'applicants'
-            applicants = applicants[:applicants.find(" applicants")]
-            # enter, typically, three applicant location data pairs
-            location_data  = {
-                "city"       : city, 
-                "applicants" : applicants
-            }
-            applicants_info["location" + str(i + 1)] = location_data
-    except Exception as e:
-        print("error acquiring applicants locations")
-        print(e)
-    return applicants_info
-
-def applicants_skills(driver):
-    """
-    scrapes applicant skills by finding 'pill' tags in html
-    returns list of skills. If skills not present on page, then
-    returns empty list
-    """
-    try:
-        raw_skills = driver.find_elements_by_css_selector("span.pill")
-        skills     = [skill.text for skill in raw_skills] 
-        return skills
-    except Exception as e:
-        print("error acquiring applicant skills")
-        print(e)
-    return []
-
-def scrape_page(driver, **kwargs):
-    """
-    scrapes single job page after the driver loads a new job posting.
-    Returns data as a dictionary
-    """
-    # wait ~1 second for elements to be dynamically rendered
-    time.sleep(1.2)
-    start = time.time()
-    containers = [
-        "section#top-card div.content",            # job content
-        "div.job-salary-container",                # job salary
-        "ul.company-growth-stats.stats-list",      # company stats
-        "div.insights-card.applicants-skills",     # applicants skills
-        "div.applicants-locations-list"            # applicants locations
-    ]
-    for container in containers:
-        try:
-            WebDriverWait(driver, .25).until(
-                EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, container)
-                    )
-                )
-        except Exception as e:
-            print("timeout error waiting for container to load or element" \
-                  " not found: {}".format(container))
-            print(e)
-    applicant_info = {
-        "num_applicants"    :  num_applicants(driver),
-        "skills"            :  applicants_skills(driver),
-        "education"         :  applicants_education(driver),
-        "locations"         :  applicants_locations(driver)
-    }
-    job_info = {
-        "job_id"            :  job_id(driver),
-        "salary_estimates"  :  salary_data(driver),
-        "company_info"      :  company_data(driver)
-    }
-    job_info.update(job_data(driver))
-    data = {
-        "applicant_info"    :  applicant_info,
-        "job_info"          :  job_info,
-        "post_info"         :  post_data(driver),
-        "search_info"       :  kwargs
-    }
-    print("scraped page in  {}  seconds\n".format(time.time()-start))
-    # try:
-    #     print("data:\n\n{}\n".format(data))
-    # except Exception as e:
-    #     print("data could not be printed to console\n")
-    return data
+    def save_json(self):
+        with open(os.path.join(os.getcwd(), *self.path_args, 'lk_jobs_data.json'), 'w') as data:
+           data.write(json.dumps(self.data))
